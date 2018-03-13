@@ -18,12 +18,12 @@ import tarfile
 import matplotlib.pyplot as plt
 import numpy as np
 import tensorflow as tf
-from six.moves import urllib
+from six import moves
 from tensorflow.python.framework import ops
 
 ops.reset_default_graph()
 
-# Change Directory
+# 1. 定位当前的工作路径
 abspath = os.path.abspath(__file__) # abspath返回绝对路径
 dname = os.path.dirname(abspath)
 os.chdir(dname) # 切换到当前路径
@@ -31,11 +31,11 @@ os.chdir(dname) # 切换到当前路径
 # Start a graph session
 sess = tf.Session()
 
-# Set model parameters
+# 2. 设置模型参数
 batch_size = 128 # 批量处理的数量
 data_dir = 'temp' # 数据集存储的路径
 output_every = 50
-generations = 20000
+generations = 1000
 eval_every = 500
 image_height = 32 # 图片的大小
 image_width = 32
@@ -46,6 +46,7 @@ num_targets = 10 # 目标分类的数量
 extract_folder = 'cifar-10-batches-bin'
 
 # Exponential Learning Rate Decay Params
+# 这些参数与训练过程有关
 learning_rate = 0.1
 lr_decay = 0.1
 num_gens_to_wait = 250.
@@ -54,46 +55,58 @@ num_gens_to_wait = 250.
 image_vec_length = image_height * image_width * num_channels
 record_length = 1 + image_vec_length  # 这里加上1是因为还有一位label
 
-# Load data
+# 3. 下载数据集，存入temp路径中
 data_dir = 'temp'
 if not os.path.exists(data_dir):
     os.makedirs(data_dir)
 cifar10_url = 'http://www.cs.toronto.edu/~kriz/cifar-10-binary.tar.gz'
 
-# Check if file exists, otherwise download it
+# 这是个小技巧，避免重复下载数据集
 data_file = os.path.join(data_dir, 'cifar-10-binary.tar.gz')
 if os.path.isfile(data_file):
     pass
 else:
-    # Download file
+    # 开始下载数据集
     def progress(block_num, block_size, total_size):
         progress_info = [cifar10_url, float(block_num * block_size) / float(total_size) * 100.0]
         print('\r Downloading {} - {:.2f}%'.format(*progress_info), end="")
 
-
-    filepath, _ = urllib.request.urlretrieve(cifar10_url, data_file, progress)
-    # Extract file
+    # urlretrieve()方法直接将远程数据下载到本地, 但不知道为什么在这里不显示出来
+    # urllib.request.urlretrieve(url,filename=None,reporthook=None, data=None)
+    # reprothook为一个回调函数，调用程序进行处理
+    filepath, _ = moves.urllib.request.urlretrieve(cifar10_url, data_file, progress)
+    # tarfile主要是用来处理压缩文件的
     tarfile.open(filepath, 'r:gz').extractall(data_dir)
 
 
-# Define CIFAR reader
+#  定义一个cifar的reader这样就避免了数据集过大不能进行读取的困难
 def read_cifar_files(filename_queue, distort_images=True):
+    # FixedLengthRecordReader读取固定长度字节的记录, decode_raw操作可以讲一个字符串转换为一个uint8的张量
+    # 这两个操作是一起进行的
     reader = tf.FixedLengthRecordReader(record_bytes=record_length)
     key, record_string = reader.read(filename_queue)
     record_bytes = tf.decode_raw(record_string, tf.uint8)
+    # tf.slice函数进行input的部分抽取
+    """
+    从这段代码中我们可以得知:
+    我们从数据集中抽取图像分类标签与图像，image_vec_length为图像的大小
+    标签为数据集的第一个标记的结果
+    """
     image_label = tf.cast(tf.slice(record_bytes, [0], [1]), tf.int32)
-
-    # Extract image
+    # 进行shape的修改
     image_extracted = tf.reshape(tf.slice(record_bytes, [1], [image_vec_length]),
                                  [num_channels, image_height, image_width])
 
-    # Reshape image
+    # 注意下tf.transpose的用法特别是第二个参数的含义 url = "http://blog.csdn.net/uestc_c2_403/article/details/73350498"
+    # image_extacted.shape()=[3，32，32], image_uint8image.shape()=[32, 32, 3]
     image_uint8image = tf.transpose(image_extracted, [1, 2, 0])
     reshaped_image = tf.cast(image_uint8image, tf.float32)
-    # Randomly Crop image
+    # tf.image.resize_image_with_crop_or_pad是进行图像裁剪的方式
+    # final_image为最后放入程序中的图片
     final_image = tf.image.resize_image_with_crop_or_pad(reshaped_image, crop_width, crop_height)
 
     if distort_images:
+        # 这里好像是进行图片的反转什么之类的
         # Randomly flip the image horizontally, change the brightness and contrast
         final_image = tf.image.random_flip_left_right(final_image)
         final_image = tf.image.random_brightness(final_image, max_delta=63)
@@ -104,7 +117,19 @@ def read_cifar_files(filename_queue, distort_images=True):
     return (final_image, image_label)
 
 
-# Create a CIFAR image pipeline from reader
+# 5. 这段代码是tensorflow中比较特殊的数据管道，通过这个管道我们可以乱序读取数据集
+# 详细介绍：http://wiki.jikexueyuan.com/project/tensorflow-zh/how_tos/reading_data.html
+"""
+创建的顺序：
+1.文件名列表
+2.可配置的 文件名乱序(shuffling)
+3.可配置的 最大训练迭代数(epoch limit)
+4.文件名队列
+5.针对输入文件格式的阅读器
+6.纪录解析器
+7.可配置的预处理器
+8.样本队列
+"""
 def input_pipeline(batch_size, train_logical=True):
     if train_logical:
         files = [os.path.join(data_dir, extract_folder, 'data_batch_{}.bin'.format(i)) for i in range(1, 6)]
@@ -115,7 +140,7 @@ def input_pipeline(batch_size, train_logical=True):
     把我们需要的全部文件打包为一个tf内部的queue类型，
     之后tf开文件就从这个queue中取目录了
     """
-    filename_queue = tf.train.string_input_producer(files)
+    filename_queue = tf.train.string_input_producer(files) # 将获取的文件列表转换成张量队列
     image, label = read_cifar_files(filename_queue)
 
     # min_after_dequeue defines how big a buffer we will randomly sample
@@ -137,9 +162,9 @@ def input_pipeline(batch_size, train_logical=True):
     return (example_batch, label_batch)
 
 
-# Define the model architecture, this will return logits from images
+# 6. 构建卷积神经网的模型，代码的核心部分
 def cifar_cnn_model(input_images, batch_size, train_logical=True):
-    def truncated_normal_var(name, shape, dtype):
+    def truncated_normal_var(name, shape, dtype): # 自己去定义一个生成截取正态分布的函数
         return (
         tf.get_variable(name=name, shape=shape, dtype=dtype, initializer=tf.truncated_normal_initializer(stddev=0.05)))
 
@@ -152,7 +177,7 @@ def cifar_cnn_model(input_images, batch_size, train_logical=True):
         conv1_kernel = truncated_normal_var(name='conv_kernel1', shape=[5, 5, 3, 64], dtype=tf.float32)
         # We convolve across the image with a stride size of 1
         conv1 = tf.nn.conv2d(input_images, conv1_kernel, [1, 1, 1, 1], padding='SAME')
-        # Initialize and add the bias term
+        # 需要记住一点东西
         conv1_bias = zero_var(name='conv_bias1', shape=[64], dtype=tf.float32)
         conv1_add_bias = tf.nn.bias_add(conv1, conv1_bias)
         # ReLU element wise
@@ -211,11 +236,16 @@ def cifar_cnn_model(input_images, batch_size, train_logical=True):
     return (final_output)
 
 
-# Loss function
+# 7. 定义损失函数
 def cifar_loss(logits, targets):
     # Get rid of extra dimensions and cast targets into integers
-    targets = tf.squeeze(tf.cast(targets, tf.int32))
+    targets = tf.squeeze(tf.cast(targets, tf.int32)) # squeeze的主要作用还是进行降维处理
     # Calculate cross entropy from logits and targets
+    """
+    这里要重新理解下sparse_softmax_cross_entropy_with_logits()这个函数
+    logits:预测结果，必须是一个（batch_size, targets_num)的张量，同时数据类型为float
+    labels:真实结果，必须是一个（batch_size, )的张量，同时数据类型为int
+    """
     cross_entropy = tf.nn.sparse_softmax_cross_entropy_with_logits(logits=logits, labels=targets)
     # Take the average loss across batch size
     cross_entropy_mean = tf.reduce_mean(cross_entropy, name='cross_entropy')
@@ -225,6 +255,7 @@ def cifar_loss(logits, targets):
 # Train step
 def train_step(loss_value, generation_num):
     # Our learning rate is an exponential decay after we wait a fair number of generations
+    # 这里使用了指数衰减法，没看懂，好像是用来求最佳的学习率的
     model_learning_rate = tf.train.exponential_decay(learning_rate, generation_num,
                                                      num_gens_to_wait, lr_decay, staircase=True)
     # Create optimizer
@@ -234,7 +265,7 @@ def train_step(loss_value, generation_num):
     return (train_step)
 
 
-# Accuracy function
+# 8. 典型的定义结果准确度的函数
 def accuracy_of_batch(logits, targets):
     # Make sure targets are integers and drop extra dimensions
     targets = tf.squeeze(tf.cast(targets, tf.int32))
@@ -247,22 +278,26 @@ def accuracy_of_batch(logits, targets):
     return (accuracy)
 
 
-# Get data
+# 4. 正式开始，前面的运行时进行数据集的获取
 print('Getting/Transforming Data.')
-# Initialize the data pipeline
+"""
+以下是进行input_pipeline的操作，这是可以进行通用的
+"""
+# 初始化input_pipeline
 images, targets = input_pipeline(batch_size, train_logical=True)
 # Get batch test images and targets from pipline
 test_images, test_targets = input_pipeline(batch_size, train_logical=False)
 
 # Declare Model
 print('Creating the CIFAR10 Model.')
+# tf.Variable_scope()为共享变量，这样就不用重复声明变量
 with tf.variable_scope('model_definition') as scope:
     # Declare the training network model
     model_output = cifar_cnn_model(images, batch_size)
     # This is very important!!!  We must set the scope to REUSE the variables,
     #  otherwise, when we set the test network model, it will create new random
     #  variables.  Otherwise we get random evaluations on the test batches.
-    scope.reuse_variables()
+    scope.reuse_variables() # 检测变量是否共享了
     test_output = cifar_cnn_model(test_images, batch_size)
 
 # Declare loss function
@@ -290,7 +325,9 @@ print('Starting Training')
 train_loss = []
 test_accuracy = []
 for i in range(generations):
-    _, loss_value = sess.run([train_op, loss])
+    _, loss_value = sess.run([train_op, loss]) # 还有这种操作,_的用法就是这个返回值没有用
+
+    writer = tf.summary.FileWriter('./cnn_cifra10', sess.graph)
 
     if (i + 1) % output_every == 0:
         train_loss.append(loss_value)
@@ -302,6 +339,7 @@ for i in range(generations):
         test_accuracy.append(temp_accuracy)
         acc_output = ' --- Test Accuracy = {:.2f}%.'.format(100. * temp_accuracy)
         print(acc_output)
+writer.close()
 
 # Print loss and accuracy
 # Matlotlib code to plot the loss and accuracies
